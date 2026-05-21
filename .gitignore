@@ -216,3 +216,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Environment
+.env
+
+# Data files (tracked by DVC, not Git)
+data/raw/
+data/processed/
+data/validated/
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/

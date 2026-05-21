@@ -1,0 +1,29 @@
+format:
+  type: alpaca                   # instruction / input / output
+  fields:
+    instruction: instruction
+    input: input
+    output: output
+
+quality:
+  min_instruction_length: 20
+  min_output_length: 50
+  max_output_length: 2048
+  min_output_words: 15
+  dedup_threshold: 0.85          # jaccard similarity — drop near-duplicates
+
+splits:
+  train: 0.90
+  validation: 0.05
+  test: 0.05
+
+output:
+  processed_dir: data/processed
+  validated_dir: data/validated
+  train_file: sre_ops_train_v1.jsonl
+  val_file: sre_ops_val_v1.jsonl
+  test_file: sre_ops_test_v1.jsonl
+
+s3:
+  bucket: sre-llmops-artifacts
+  prefix: datasets/v1/

@@ -1,0 +1,52 @@
+stackoverflow:
+  tags:
+    - kubernetes
+    - prometheus
+    - terraform
+    - helm
+    - "github-actions"
+    - argocd
+    - "fluent-bit"
+    - dynatrace
+    - grafana
+    - "aws-eks"
+  filters:
+    min_score: 5
+    min_answers: 1
+    has_accepted_answer: true
+    pagesize: 100
+    max_pages: 50
+  output_dir: data/raw/stackoverflow
+
+github:
+  repositories:
+    - argoproj/argo-cd           # ~8k issues, focused ArgoCD bugs
+    - fluent/fluent-bit           # ~3k issues, log pipeline problems
+    - grafana/loki                # ~4k issues, logging stack
+    - VictoriaMetrics/VictoriaMetrics  # ~2k issues, metrics/alerting
+    - cert-manager/cert-manager   # ~3k issues, TLS/cert problems
+    - external-secrets/external-secrets  # ~1k issues, secrets management
+    - aws/karpenter               # ~2k issues, node scaling
+  filters:
+    state: closed
+    labels: []
+    min_comments: 3
+    max_issues_per_repo: 100
+  output_dir: data/raw/github_issues
+
+synthetic:
+  num_samples: 500
+  categories:
+    - kubernetes_crashloop
+    - pod_oom_killed
+    - prometheus_alert_firing
+    - terraform_state_lock
+    - helm_deploy_failed
+    - node_notready
+    - pvc_pending
+    - ingress_502
+    - argocd_sync_failed
+    - fluent_bit_config_error
+    - eks_node_pressure
+    - certificate_expiry
+  output_dir: data/raw/synthetic

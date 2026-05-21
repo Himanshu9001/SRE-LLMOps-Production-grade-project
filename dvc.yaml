@@ -1,0 +1,37 @@
+stages:
+  scrape:
+    cmd: python -m src.pipeline.run_pipeline --stage scrape
+    deps:
+      - src/scrapers/stackoverflow_scraper.py
+      - src/scrapers/github_scraper.py
+      - src/scrapers/synthetic_generator.py
+      - configs/scraper_config.yaml
+    outs:
+      - data/raw/stackoverflow/stackoverflow_raw.jsonl
+      - data/raw/github_issues/github_issues_raw.jsonl
+      - data/raw/synthetic/synthetic_incidents.jsonl
+
+  format:
+    cmd: python -m src.pipeline.run_pipeline --stage format
+    deps:
+      - src/formatters/alpaca_formatter.py
+      - data/raw/stackoverflow/stackoverflow_raw.jsonl
+      - data/raw/github_issues/github_issues_raw.jsonl
+      - data/raw/synthetic/synthetic_incidents.jsonl
+    outs:
+      - data/processed/stackoverflow_formatted.jsonl
+      - data/processed/github_issues_formatted.jsonl
+      - data/processed/synthetic_formatted.jsonl
+
+  validate:
+    cmd: python -m src.pipeline.run_pipeline --stage validate
+    deps:
+      - src/validators/dataset_validator.py
+      - configs/dataset_config.yaml
+      - data/processed/stackoverflow_formatted.jsonl
+      - data/processed/github_issues_formatted.jsonl
+      - data/processed/synthetic_formatted.jsonl
+    outs:
+      - data/validated/sre_ops_train_v1.jsonl
+      - data/validated/sre_ops_val_v1.jsonl
+      - data/validated/sre_ops_test_v1.jsonl

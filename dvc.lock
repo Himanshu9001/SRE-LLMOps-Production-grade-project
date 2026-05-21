@@ -1,0 +1,102 @@
+schema: '2.0'
+stages:
+  scrape:
+    cmd: python -m src.pipeline.run_pipeline --stage scrape
+    deps:
+    - path: configs/scraper_config.yaml
+      hash: md5
+      md5: f240a143157c2dc5cfa286181db28928
+      size: 1328
+    - path: src/scrapers/github_scraper.py
+      hash: md5
+      md5: d9aa23f8d5f7d3b79bfd8fbf3f6bf120
+      size: 6131
+    - path: src/scrapers/stackoverflow_scraper.py
+      hash: md5
+      md5: fc48456077821a0c41ecc0b20d8d105f
+      size: 6496
+    - path: src/scrapers/synthetic_generator.py
+      hash: md5
+      md5: ad7eb7376fdfe6ea4c3fddf30fb73b17
+      size: 20648
+    outs:
+    - path: data/raw/github_issues/github_issues_raw.jsonl
+      hash: md5
+      md5: f02c3d464abc805b2dfc854cb077640d
+      size: 700935
+    - path: data/raw/stackoverflow/stackoverflow_raw.jsonl
+      hash: md5
+      md5: 281465d8a872564f0f7872bdf9be8d0a
+      size: 14635907
+    - path: data/raw/synthetic/synthetic_incidents.jsonl
+      hash: md5
+      md5: 3cf2ba910caea6c0ac24ce99b34b89b5
+      size: 699218
+  format:
+    cmd: python -m src.pipeline.run_pipeline --stage format
+    deps:
+    - path: data/raw/github_issues/github_issues_raw.jsonl
+      hash: md5
+      md5: f02c3d464abc805b2dfc854cb077640d
+      size: 700935
+    - path: data/raw/stackoverflow/stackoverflow_raw.jsonl
+      hash: md5
+      md5: 281465d8a872564f0f7872bdf9be8d0a
+      size: 14635907
+    - path: data/raw/synthetic/synthetic_incidents.jsonl
+      hash: md5
+      md5: 3cf2ba910caea6c0ac24ce99b34b89b5
+      size: 699218
+    - path: src/formatters/alpaca_formatter.py
+      hash: md5
+      md5: 374873fa31a9cf40b34ae26fcb44270b
+      size: 5818
+    outs:
+    - path: data/processed/github_issues_formatted.jsonl
+      hash: md5
+      md5: d41d8cd98f00b204e9800998ecf8427e
+      size: 0
+    - path: data/processed/stackoverflow_formatted.jsonl
+      hash: md5
+      md5: b02473f5a1ccfa439d2b6a97df6f397b
+      size: 8927810
+    - path: data/processed/synthetic_formatted.jsonl
+      hash: md5
+      md5: 3cf2ba910caea6c0ac24ce99b34b89b5
+      size: 699218
+  validate:
+    cmd: python -m src.pipeline.run_pipeline --stage validate
+    deps:
+    - path: configs/dataset_config.yaml
+      hash: md5
+      md5: f1db25d6959d7cd25ba336ea5096ea2f
+      size: 630
+    - path: data/processed/github_issues_formatted.jsonl
+      hash: md5
+      md5: d41d8cd98f00b204e9800998ecf8427e
+      size: 0
+    - path: data/processed/stackoverflow_formatted.jsonl
+      hash: md5
+      md5: b02473f5a1ccfa439d2b6a97df6f397b
+      size: 8927810
+    - path: data/processed/synthetic_formatted.jsonl
+      hash: md5
+      md5: 3cf2ba910caea6c0ac24ce99b34b89b5
+      size: 699218
+    - path: src/validators/dataset_validator.py
+      hash: md5
+      md5: b239dda24e4ec397ca88c8d9785bc5e2
+      size: 8518
+    outs:
+    - path: data/validated/sre_ops_test_v1.jsonl
+      hash: md5
+      md5: 235025871f6a4c9b43e836f05bf216dd
+      size: 457149
+    - path: data/validated/sre_ops_train_v1.jsonl
+      hash: md5
+      md5: 7b2bef686c42e8939f6bbec2befacce3
+      size: 7945764
+    - path: data/validated/sre_ops_val_v1.jsonl
+      hash: md5
+      md5: dd38ba76bf6dcc518291175c8915bd9e
+      size: 436144

@@ -1,0 +1,5 @@
+[core]
+    remote = s3remote
+['remote "s3remote"']
+    url = s3://sre-llmops-artifacts/dvc-cache
+    region = ap-south-1
