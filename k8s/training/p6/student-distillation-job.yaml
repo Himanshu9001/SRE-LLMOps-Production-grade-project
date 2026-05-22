@@ -1,0 +1,82 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: student-distillation
+  namespace: training
+  labels:
+    app: student-distillation
+    phase: p6
+spec:
+  ttlSecondsAfterFinished: 7200
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      activeDeadlineSeconds: 18000
+      initContainers:
+        - name: download-soft-labels
+          image: amazon/aws-cli:latest
+          command:
+            - aws
+            - s3
+            - cp
+            - s3://sre-llmops-artifacts/soft-labels/llama3-70b-T4-top50.jsonl
+            - /tmp/soft-labels/soft_labels.jsonl
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+      containers:
+        - name: student
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p6-v1
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - src.training.distillation.student_distillation
+            - --soft-labels-path=/tmp/soft-labels/soft_labels.jsonl
+            - --output-s3-prefix=adapters/llama3-8b-distilled-v1
+            - --experiment-name=sre-distillation-p6
+            - --alpha=0.5
+            - --temperature=4.0
+            - --lora-r=16
+            - --num-epochs=3
+            - --batch-size=4
+            - --learning-rate=2e-4
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "30Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "150Gi"
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "16Gi"

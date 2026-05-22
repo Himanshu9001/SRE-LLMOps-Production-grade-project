@@ -1,0 +1,63 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: teacher-inference
+  namespace: training
+  labels:
+    app: teacher-inference
+    phase: p6
+spec:
+  ttlSecondsAfterFinished: 7200
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      activeDeadlineSeconds: 28800  # 8 hours — 70B inference is slow
+      containers:
+        - name: teacher
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p6-v1
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - src.training.distillation.teacher_inference
+            - --teacher-s3-prefix=base-models/llama3-70b
+            - --dataset-s3-key=datasets/v1/sre_ops_train_v1.jsonl
+            - --output-s3-key=soft-labels/llama3-70b-T4-top50.jsonl
+            - --temperature=4.0
+            - --top-k=50
+            - --batch-size=2
+            - --max-length=1024
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          resources:
+            requests:
+              memory: "48Gi"
+              cpu: "8"
+              nvidia.com/gpu: "2"   # 70B needs 2x A10G (48GB)
+            limits:
+              memory: "60Gi"
+              cpu: "8"
+              nvidia.com/gpu: "2"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "200Gi"
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "16Gi"
