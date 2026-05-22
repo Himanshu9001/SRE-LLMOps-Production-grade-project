@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quantization-benchmark
+  namespace: training
+  labels:
+    app: benchmark
+    phase: p8
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      initContainers:
+        - name: download-models
+          image: amazon/aws-cli:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              aws s3 sync s3://sre-llmops-artifacts/base-models/llama3-8b /tmp/models/fp16
+              aws s3 sync s3://sre-llmops-artifacts/quantized/llama3-8b-awq-4bit /tmp/models/awq
+              aws s3 sync s3://sre-llmops-artifacts/quantized/llama3-8b-gptq-4bit /tmp/models/gptq
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+      containers:
+        - name: benchmark
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p8-v1
+          command:
+            - python
+            - -m
+            - src.quantization.benchmark
+            - --mlflow-uri=http://mlflow.mlflow.svc.cluster.local:5000
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+          resources:
+            requests:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "48Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+      volumes:
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "200Gi"

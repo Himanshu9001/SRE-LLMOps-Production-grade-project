@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: awq-quantize
+  namespace: training
+  labels:
+    app: quantization
+    method: awq
+    phase: p8
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      containers:
+        - name: awq-quantizer
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p8-v1
+          command:
+            - python
+            - -m
+            - src.quantization.awq_quantize
+            - --base-model-s3-prefix=base-models/llama3-8b
+            - --adapter-s3-prefix=adapters/llama3-8b-lora-kd-v1/final
+            - --output-s3-prefix=quantized/llama3-8b-awq-4bit
+            - --bits=4
+            - --group-size=128
+            - --merge-adapter
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+      volumes:
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "80Gi"
