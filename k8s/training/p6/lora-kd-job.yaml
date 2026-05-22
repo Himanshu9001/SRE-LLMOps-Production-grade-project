@@ -1,0 +1,88 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lora-kd-training
+  namespace: training
+  labels:
+    app: lora-kd-training
+    phase: p7
+spec:
+  ttlSecondsAfterFinished: 7200
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      activeDeadlineSeconds: 18000
+      initContainers:
+        - name: download-soft-labels
+          image: amazon/aws-cli:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /tmp/soft-labels
+              aws s3 cp \
+                s3://sre-llmops-artifacts/soft-labels/llama3-70b-T4-top50.jsonl \
+                /tmp/soft-labels/soft_labels.jsonl
+              echo "Soft labels downloaded: $(wc -l < /tmp/soft-labels/soft_labels.jsonl) records"
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+      containers:
+        - name: lora-kd-trainer
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p7-v1
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - src.training.distillation.lora_kd
+            - --alpha=0.5
+            - --temperature=4.0
+            - --lora-r=16
+            - --lora-alpha=32
+            - --num-epochs=3
+            - --batch-size=4
+            - --grad-accum=4
+            - --learning-rate=2e-4
+            - --output-s3-prefix=adapters/llama3-8b-lora-kd-v1
+            - --experiment-name=sre-lora-kd-p7
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "30Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "150Gi"
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "16Gi"
