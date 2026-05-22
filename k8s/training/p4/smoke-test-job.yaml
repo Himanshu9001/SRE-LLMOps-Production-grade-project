@@ -1,0 +1,61 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qlora-smoke-test
+  namespace: training
+  labels:
+    app: qlora-training
+    phase: p4-smoke-test
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        role: cpu-workload
+      containers:
+        - name: trainer
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p4-v1
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - src.training.train
+            - --model-s3-prefix=smoke-test/opt-125m
+            - --dataset-s3-key=datasets/v1/sre_ops_train_v1.jsonl
+            - --val-s3-key=datasets/v1/sre_ops_val_v1.jsonl
+            - --output-s3-prefix=adapters/smoke-test-v1
+            - --experiment-name=sre-smoke-test
+            - --num-epochs=1
+            - --batch-size=2
+            - --grad-accum-steps=2
+            - --learning-rate=2e-4
+            - --max-length=256
+            - --lora-r=8
+            - --lora-alpha=16
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: SMOKE_TEST
+              value: "true"
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2000m"
+              ephemeral-storage: "5Gi"
+            limits:
+              memory: "8Gi"
+              cpu: "4000m"
+              ephemeral-storage: "10Gi"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+      volumes:
+        - name: tmp-storage
+          emptyDir: {}

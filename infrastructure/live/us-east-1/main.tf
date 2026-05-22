@@ -50,26 +50,9 @@ module "node_groups" {
   cluster_name       = module.eks.cluster_name
   eks_node_role_arn  = module.iam.eks_node_role_arn
   private_subnet_ids = module.vpc.private_subnet_ids
-  gpu_subnet_ids     = [module.vpc.private_subnet_ids[0]]
+  gpu_subnet_ids     = module.vpc.private_subnet_ids  # all 3 AZs now
   tags               = local.tags
 }
-
-# FSx for Lustre — uncomment only when running training jobs
-# Costs ~$168/day minimum — destroy after each training run
-#
-# module "fsx" {
-#   source = "../../modules/fsx"
-#
-#   project_name     = var.project_name
-#   environment      = var.environment
-#   vpc_id           = module.vpc.vpc_id
-#   subnet_id        = module.vpc.private_subnet_ids[0]
-#   vpc_cidr         = var.vpc_cidr
-#   s3_bucket_name   = var.s3_bucket_name
-#   s3_import_prefix = "base-models/"
-#   storage_capacity = var.fsx_storage_capacity
-#   tags             = local.tags
-# }
 
 module "rds" {
   source = "../../modules/rds"
@@ -82,3 +65,6 @@ module "rds" {
   db_password        = var.mlflow_db_password
   tags               = local.tags
 }
+
+# FSx for Lustre — uncomment only when running training jobs
+# module "fsx" { ... }

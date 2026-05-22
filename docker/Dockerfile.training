@@ -1,0 +1,22 @@
+# Base: PyTorch 2.3 with CUDA 12.1 — matches A10G on G5 instances
+FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements-training.txt .
+RUN pip install --no-cache-dir -r requirements-training.txt
+
+# Copy training source
+COPY src/ ./src/
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "-m", "src.training.train"]

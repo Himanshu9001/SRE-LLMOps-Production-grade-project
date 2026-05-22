@@ -1,0 +1,96 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qlora-llama3-sre-v1
+  namespace: training
+  labels:
+    app: qlora-training
+    model: llama3-8b
+    phase: p4
+spec:
+  ttlSecondsAfterFinished: 7200
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+
+      # Schedule ONLY on GPU nodes
+      nodeSelector:
+        node-type: gpu
+
+      # Tolerate the GPU taint
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      # Give model download + training enough time
+      activeDeadlineSeconds: 18000  # 5 hours max
+
+      initContainers:
+        - name: check-gpu
+          image: nvidia/cuda:12.1.0-base-ubuntu22.04
+          command:
+            - nvidia-smi
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+
+      containers:
+        - name: trainer
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p4-v1
+          imagePullPolicy: Always
+
+          command:
+            - python
+            - -m
+            - src.training.train
+            - --model-s3-prefix=base-models/llama3-8b
+            - --dataset-s3-key=datasets/v1/sre_ops_train_v1.jsonl
+            - --val-s3-key=datasets/v1/sre_ops_val_v1.jsonl
+            - --output-s3-prefix=adapters/llama3-8b-sre-v1
+            - --experiment-name=sre-qlora-p4
+            - --num-epochs=3
+            - --batch-size=4
+            - --grad-accum-steps=4
+            - --learning-rate=2e-4
+            - --max-length=1024
+            - --lora-r=16
+            - --lora-alpha=32
+
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "max_split_size_mb:512"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "4"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "28Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm    # shared memory for PyTorch DataLoader workers
+
+      volumes:
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "80Gi"
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "8Gi"
