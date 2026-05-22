@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sre-evaluation
+  namespace: training
+  labels:
+    app: evaluation
+    phase: p9
+spec:
+  ttlSecondsAfterFinished: 7200
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      activeDeadlineSeconds: 14400
+      containers:
+        - name: evaluator
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p9-v1
+          command:
+            - python
+            - -m
+            - src.evaluation.run_eval_pipeline
+            - --model-name=llama3-8b-sre-qlora
+            - --model-s3-prefix=base-models/llama3-8b
+            - --adapter-s3-prefix=adapters/llama3-8b-lora-kd-v1/final
+            - --use-qlora
+            - --model-type=fp16
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+      volumes:
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "80Gi"
