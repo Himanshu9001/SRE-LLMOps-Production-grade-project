@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: mlflow
+  labels:
+    app: mlflow
+    component: experiment-tracking
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      # Use IRSA service account — pod gets AWS credentials via OIDC
+      serviceAccountName: mlflow
+
+      # Schedule on cpu-workload nodes — not system nodes
+      nodeSelector:
+        role: cpu-workload
+
+      containers:
+        - name: mlflow
+          image: ghcr.io/mlflow/mlflow:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+              name: http
+
+          command:
+            - mlflow
+            - server
+            - --host=0.0.0.0
+            - --port=5000
+            - --backend-store-uri=$(MLFLOW_BACKEND_STORE_URI)
+            - --default-artifact-root=$(MLFLOW_DEFAULT_ARTIFACT_ROOT)
+            - --serve-artifacts
+
+          env:
+            - name: MLFLOW_BACKEND_STORE_URI
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-secret
+                  key: database-uri
+            - name: MLFLOW_DEFAULT_ARTIFACT_ROOT
+              value: "s3://sre-llmops-artifacts/mlflow-artifacts/"
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MLFLOW_S3_UPLOAD_EXTRA_ARGS
+              value: '{"ServerSideEncryption": "AES256"}'
+
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+
+          # Liveness: restart pod if MLflow stops responding
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+
+          # Readiness: don't send traffic until MLflow is ready
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3

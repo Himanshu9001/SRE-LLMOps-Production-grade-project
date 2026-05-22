@@ -48,3 +48,9 @@ variable "fsx_storage_capacity" {
   type        = number
   default     = 1200
 }
+
+variable "mlflow_db_password" {
+  description = "MLflow RDS password"
+  type        = string
+  sensitive   = true
+}

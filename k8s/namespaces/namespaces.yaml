@@ -1,0 +1,33 @@
+# All project namespaces defined in one place
+# Each workload gets its own namespace for RBAC isolation and resource quotas
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlflow
+  labels:
+    project: sre-llmops
+    component: experiment-tracking
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: training
+  labels:
+    project: sre-llmops
+    component: model-training
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inference
+  labels:
+    project: sre-llmops
+    component: model-serving
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    project: sre-llmops
+    component: observability

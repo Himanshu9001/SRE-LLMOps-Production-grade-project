@@ -1,0 +1,123 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-llama3-8b
+  namespace: training
+  labels:
+    app: model-downloader
+    model: llama3-8b
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        role: cpu-workload
+      containers:
+        - name: model-downloader
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              echo "=== Installing dependencies ==="
+              pip install -q huggingface_hub boto3
+
+              echo "=== Downloading model files one by one to S3 ==="
+              python3 - << 'PYEOF'
+              import os
+              import boto3
+              from huggingface_hub import list_repo_files, hf_hub_download
+              from pathlib import Path
+
+              token     = open("/secrets/hf/token").read().strip()
+              model_id  = "meta-llama/Meta-Llama-3-8B"
+              s3_bucket = "sre-llmops-artifacts"
+              s3_prefix = "base-models/llama3-8b"
+
+              os.environ["HF_TOKEN"] = token
+
+              s3 = boto3.client("s3", region_name="us-east-1")
+
+              # List repo files
+              files = list(list_repo_files(model_id, token=token))
+              skip  = {".msgpack", ".h5"}
+              files = [f for f in files
+                       if not any(f.endswith(s) for s in skip)
+                       and "flax_model" not in f
+                       and "rust_model" not in f]
+
+              print(f"Files to download: {len(files)}")
+
+              for filename in files:
+                  s3_key = f"{s3_prefix}/{filename}"
+
+                  # Check if already uploaded — resume support
+                  try:
+                      s3.head_object(Bucket=s3_bucket, Key=s3_key)
+                      print(f"  SKIP {filename} — already in S3")
+                      continue
+                  except Exception:
+                      pass
+
+                  print(f"  Downloading {filename}...")
+
+                  # hf_hub_download handles auth, redirects, retries correctly
+                  local_path = hf_hub_download(
+                      repo_id=model_id,
+                      filename=filename,
+                      token=token,
+                      local_dir="/tmp/model",
+                  )
+
+                  size_mb = Path(local_path).stat().st_size / 1024 / 1024
+                  print(f"    {size_mb:.0f} MB — uploading to S3...")
+
+                  s3.upload_file(
+                      local_path,
+                      s3_bucket,
+                      s3_key,
+                      ExtraArgs={"ServerSideEncryption": "AES256"}
+                  )
+
+                  # Remove local file after upload to free disk
+                  os.remove(local_path)
+                  print(f"    Done ✓")
+
+              print("=== All files uploaded to S3 successfully ===")
+              print(f"Model at: s3://{s3_bucket}/{s3_prefix}/")
+              PYEOF
+
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: HF_HOME
+              value: "/tmp/hf-cache"
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "1000m"
+            limits:
+              memory: "8Gi"
+              cpu: "2000m"
+              ephemeral-storage: "15Gi"
+          volumeMounts:
+            - name: hf-token
+              mountPath: /secrets/hf
+              readOnly: true
+            - name: tmp-storage
+              mountPath: /tmp
+      volumes:
+        - name: hf-token
+          secret:
+            secretName: huggingface-secret
+            items:
+              - key: token
+                path: token
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "15Gi"

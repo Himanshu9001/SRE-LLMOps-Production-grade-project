@@ -10,3 +10,5 @@ public_subnet_cidrs  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
 
 eks_cluster_version  = "1.32"
 fsx_storage_capacity = 1200
+
+mlflow_db_password = "MLflow2024SecurePass!"

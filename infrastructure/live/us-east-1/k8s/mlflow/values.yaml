@@ -1,0 +1,57 @@
+# MLflow Helm values — production deployment on EKS
+# Chart: community-charts/mlflow
+# Backend: RDS PostgreSQL 17.4
+# Artifact store: S3 sre-llmops-artifacts/mlflow-artifacts/
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mlflow/mlflow
+  tag: latest
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: false        # use pre-created SA with IRSA annotation
+  name: mlflow
+
+service:
+  type: ClusterIP
+  port: 5000
+
+# MLflow server configuration
+backendStore:
+  databaseUrl: ""      # injected from secret at runtime
+
+artifactRoot:
+  s3:
+    bucket: sre-llmops-artifacts
+    prefix: mlflow-artifacts
+
+extraEnvVars:
+  - name: MLFLOW_BACKEND_STORE_URI
+    valueFrom:
+      secretKeyRef:
+        name: mlflow-db-secret
+        key: database-uri
+  - name: MLFLOW_DEFAULT_ARTIFACT_ROOT
+    value: "s3://sre-llmops-artifacts/mlflow-artifacts/"
+  - name: AWS_DEFAULT_REGION
+    value: "us-east-1"
+  - name: MLFLOW_S3_ENDPOINT_URL
+    value: ""
+
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "1Gi"
+    cpu: "500m"
+
+# Schedule on cpu nodes, not system nodes
+nodeSelector:
+  role: cpu-workload
+
+tolerations: []
+
+affinity: {}

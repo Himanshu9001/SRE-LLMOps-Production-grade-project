@@ -21,3 +21,7 @@ output "training_irsa_arn" {
 output "inference_irsa_arn" {
   value = module.iam.inference_irsa_arn
 }
+
+output "rds_endpoint" {
+  value = module.rds.rds_endpoint
+}
