@@ -1,0 +1,108 @@
+# Multi-node FSDP training using Kubernetes Job with headless service
+# Worker 0 = master node, Worker 1+ = worker nodes
+# NCCL handles GPU-GPU communication across nodes via EFA/TCP
+apiVersion: v1
+kind: Service
+metadata:
+  name: fsdp-master
+  namespace: training
+spec:
+  clusterIP: None   # headless service — DNS resolves to pod IP directly
+  selector:
+    job-name: fsdp-multi-node
+    role: master
+  ports:
+    - port: 29500
+      name: nccl
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fsdp-multi-node
+  namespace: training
+  labels:
+    app: fsdp-training
+    phase: p5b
+spec:
+  completions: 2      # 2 pods total (2 nodes)
+  parallelism: 2      # run simultaneously
+  completionMode: Indexed  # pod index 0 = master, 1 = worker
+  ttlSecondsAfterFinished: 7200
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: training-job
+      restartPolicy: Never
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      subdomain: fsdp-master
+      containers:
+        - name: fsdp-trainer
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p5-v1
+          imagePullPolicy: Always
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # JOB_COMPLETION_INDEX: 0=master, 1+=worker
+              NODE_RANK=$JOB_COMPLETION_INDEX
+              MASTER_ADDR="fsdp-multi-node-0.fsdp-master.training.svc.cluster.local"
+              NNODES=2
+              NPROC_PER_NODE=1
+
+              echo "Node rank: $NODE_RANK, Master: $MASTER_ADDR"
+
+              torchrun \
+                --nnodes=$NNODES \
+                --nproc_per_node=$NPROC_PER_NODE \
+                --node_rank=$NODE_RANK \
+                --master_addr=$MASTER_ADDR \
+                --master_port=29500 \
+                -m src.training.distributed.fsdp_train \
+                --sharding-strategy=FULL_SHARD \
+                --num-epochs=3 \
+                --batch-size=2 \
+                --grad-accum=8 \
+                --learning-rate=2e-4 \
+                --max-length=1024 \
+                --lora-r=16
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: NCCL_DEBUG
+              value: "WARN"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            - name: NCCL_IB_DISABLE
+              value: "1"   # disable InfiniBand, use TCP for EKS
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+          resources:
+            requests:
+              memory: "28Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: "100Gi"
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "16Gi"

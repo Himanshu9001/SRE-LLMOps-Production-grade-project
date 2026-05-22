@@ -1,0 +1,128 @@
+# Volcano Job — gang scheduling for multi-node GPU training
+# Gang scheduling: ALL pods start simultaneously or NONE start
+# Prevents partial allocation deadlock where worker waits for master
+# that can't start because worker is holding a GPU slot
+#
+# Without gang scheduling:
+#   Worker pod starts, grabs GPU, waits for master
+#   Master pod can't start because no GPU available
+#   Deadlock — training never starts
+#
+# With Volcano gang scheduling:
+#   All pods scheduled atomically — all or nothing
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: fsdp-volcano-job
+  namespace: training
+spec:
+  minAvailable: 2       # minimum pods needed to start (gang threshold)
+  schedulerName: volcano
+
+  plugins:
+    ssh: []             # enables SSH between pods for torchrun
+    svc: []             # creates headless service for pod DNS
+
+  policies:
+    - event: PodEvicted
+      action: RestartJob   # if any pod evicted, restart entire job
+    - event: PodFailed
+      action: RestartJob
+
+  tasks:
+    - name: master
+      replicas: 1
+      policies:
+        - event: TaskCompleted
+          action: CompleteJob
+      template:
+        spec:
+          serviceAccountName: training-job
+          nodeSelector:
+            node-type: gpu
+          tolerations:
+            - key: "nvidia.com/gpu"
+              operator: "Equal"
+              value: "true"
+              effect: "NoSchedule"
+          containers:
+            - name: trainer
+              image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p5-v1
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  torchrun \
+                    --nnodes=2 \
+                    --nproc_per_node=1 \
+                    --node_rank=0 \
+                    --master_addr=$(VK_TASK_INDEX).fsdp-volcano-job \
+                    --master_port=29500 \
+                    -m src.training.distributed.fsdp_train \
+                    --sharding-strategy=FULL_SHARD
+              env:
+                - name: AWS_DEFAULT_REGION
+                  value: "us-east-1"
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow.mlflow.svc.cluster.local:5000"
+                - name: NCCL_SOCKET_IFNAME
+                  value: "eth0"
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+                  memory: "32Gi"
+                  cpu: "8"
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: "16Gi"
+
+    - name: worker
+      replicas: 1
+      template:
+        spec:
+          serviceAccountName: training-job
+          nodeSelector:
+            node-type: gpu
+          tolerations:
+            - key: "nvidia.com/gpu"
+              operator: "Equal"
+              value: "true"
+              effect: "NoSchedule"
+          containers:
+            - name: trainer
+              image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/training:p5-v1
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  torchrun \
+                    --nnodes=2 \
+                    --nproc_per_node=1 \
+                    --node_rank=1 \
+                    --master_addr=master-0.fsdp-volcano-job \
+                    --master_port=29500 \
+                    -m src.training.distributed.fsdp_train \
+                    --sharding-strategy=FULL_SHARD
+              env:
+                - name: AWS_DEFAULT_REGION
+                  value: "us-east-1"
+                - name: NCCL_SOCKET_IFNAME
+                  value: "eth0"
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+                  memory: "32Gi"
+                  cpu: "8"
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: "16Gi"
