@@ -1,0 +1,196 @@
+# Prometheus alerting rules for AI/ML workloads
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sre-llmops-rules
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    # -----------------------------------------------------------------------
+    # GPU Health Alerts
+    # -----------------------------------------------------------------------
+    - name: gpu.health
+      interval: 30s
+      rules:
+        - alert: GPUHighTemperature
+          expr: DCGM_FI_DEV_GPU_TEMP > 85
+          for: 5m
+          labels:
+            severity: warning
+            team:     sre-llmops
+          annotations:
+            summary:     "GPU temperature critical on {{ $labels.gpu }}"
+            description: "GPU temp {{ $value }}°C > 85°C threshold. Risk of thermal throttling."
+            runbook:     "Check cooling, reduce workload, consider node replacement"
+
+        - alert: GPUECCDoubleBitError
+          expr: increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[5m]) > 0
+          labels:
+            severity: critical
+            team:     sre-llmops
+          annotations:
+            summary:     "GPU double-bit ECC error on {{ $labels.instance }}"
+            description: "Double-bit ECC errors are UNRECOVERABLE. Training data corrupted."
+            runbook:     "Immediately drain node, replace GPU instance"
+
+        - alert: GPUXIDError
+          expr: increase(DCGM_FI_DEV_XID_ERRORS[5m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary:     "GPU XID fault — {{ $labels.instance }}"
+            description: "XID error indicates GPU hardware fault. Pod likely crashed."
+
+        - alert: GPUMemoryFull
+          expr: |
+            DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL > 0.95
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary:     "GPU VRAM > 95% on {{ $labels.instance }}"
+            description: "GPU memory {{ $value | humanizePercentage }} full. OOM imminent."
+
+        - alert: GPUUtilizationLow
+          expr: |
+            DCGM_FI_DEV_GPU_UTIL < 10
+            and on(instance) DCGM_FI_DEV_FB_USED > 1000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary:     "GPU underutilized on {{ $labels.instance }}"
+            description: "GPU < 10% utilization but memory occupied. Possible deadlock or idle training."
+
+    # -----------------------------------------------------------------------
+    # vLLM Inference Alerts
+    # -----------------------------------------------------------------------
+    - name: vllm.inference
+      interval: 15s
+      rules:
+        - alert: HighInferenceLatency
+          expr: |
+            histogram_quantile(0.99,
+              rate(vllm_request_latency_seconds_bucket{endpoint="chat"}[5m])
+            ) > 10
+          for: 5m
+          labels:
+            severity: warning
+            team:     sre-llmops
+          annotations:
+            summary:     "vLLM P99 latency > 10s"
+            description: "P99 end-to-end latency: {{ $value }}s. SLO breach risk."
+            runbook:     "Check GPU utilization, KV cache usage, concurrent requests"
+
+        - alert: HighTTFT
+          expr: |
+            histogram_quantile(0.95,
+              rate(vllm_time_to_first_token_seconds_bucket[5m])
+            ) > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary:     "vLLM P95 TTFT > 2s"
+            description: "Time to first token degraded. Users see long initial wait."
+            runbook:     "Check prefill queue depth, consider chunked prefill config"
+
+        - alert: HighKVCacheUsage
+          expr: vllm_kv_cache_usage_ratio > 0.90
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary:     "KV cache > 90% full"
+            description: "PagedAttention KV cache {{ $value | humanizePercentage }} utilized. New requests may be rejected."
+            runbook:     "Scale up replicas or reduce max_num_seqs"
+
+        - alert: InferenceErrorRate
+          expr: |
+            rate(vllm_requests_total{status="error"}[5m]) /
+            rate(vllm_requests_total[5m]) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary:     "vLLM error rate > 5%"
+            description: "Inference error rate: {{ $value | humanizePercentage }}"
+
+        - alert: VLLMDown
+          expr: up{job="vllm"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            page:     "true"
+          annotations:
+            summary:     "vLLM inference server DOWN"
+            description: "vLLM pod not responding. All inference requests failing."
+            runbook:     "kubectl logs -n inference -l app=vllm-server"
+
+    # -----------------------------------------------------------------------
+    # Training Job Alerts
+    # -----------------------------------------------------------------------
+    - name: training.jobs
+      rules:
+        - alert: TrainingJobStuck
+          expr: |
+            kube_job_status_active > 0
+            and kube_job_status_completion_time == 0
+            and (time() - kube_job_status_start_time) > 21600
+          labels:
+            severity: warning
+          annotations:
+            summary:     "Training job running > 6 hours"
+            description: "Job {{ $labels.job_name }} may be stuck."
+
+        - alert: TrainingJobFailed
+          expr: kube_job_failed > 0
+          labels:
+            severity: critical
+          annotations:
+            summary:     "Training job FAILED: {{ $labels.job_name }}"
+            description: "Training job failed. Check pod logs for root cause."
+
+        - alert: GPUMemoryFragmentation
+          expr: |
+            (DCGM_FI_DEV_FB_TOTAL - DCGM_FI_DEV_FB_USED - DCGM_FI_DEV_FB_FREE)
+            / DCGM_FI_DEV_FB_TOTAL > 0.10
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary:     "GPU memory fragmentation > 10%"
+            description: "Fragmented GPU memory may cause OOM despite apparent free space."
+
+    # -----------------------------------------------------------------------
+    # Model Drift Alerts
+    # -----------------------------------------------------------------------
+    - name: model.drift
+      rules:
+        - alert: ModelAccuracyDrift
+          expr: |
+            (
+              sre_model_sre_accuracy_current
+              - sre_model_sre_accuracy_baseline
+            ) / sre_model_sre_accuracy_baseline < -0.10
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary:     "Model accuracy drifted > 10% from baseline"
+            description: "SRE accuracy dropped. Possible data drift or model degradation."
+            runbook:     "Run full evaluation pipeline, compare with baseline"
+
+        - alert: ResponseLengthAnomaly
+          expr: |
+            avg_over_time(vllm_tokens_generated_total[1h])
+            / avg_over_time(vllm_tokens_generated_total[24h]) > 1.5
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary:     "Response length anomaly detected"
+            description: "Avg response length 50% higher than 24h baseline. Possible prompt injection or model behavior change."

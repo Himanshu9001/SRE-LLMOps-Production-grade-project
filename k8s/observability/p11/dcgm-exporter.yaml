@@ -1,0 +1,128 @@
+# NVIDIA DCGM Exporter — GPU metrics for Prometheus
+# Exposes: GPU utilization, VRAM, SM occupancy, temperature,
+#          power draw, NVLink bandwidth, PCIe throughput
+# DaemonSet: one pod per GPU node
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+  labels:
+    app: dcgm-exporter
+spec:
+  selector:
+    matchLabels:
+      app: dcgm-exporter
+  template:
+    metadata:
+      labels:
+        app: dcgm-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "9400"
+        prometheus.io/path:   "/metrics"
+    spec:
+      # Only schedule on GPU nodes
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      hostNetwork: true   # access GPU metrics from host
+      hostPID:    true
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04
+          ports:
+            - containerPort: 9400
+              name: metrics
+          env:
+            - name: DCGM_EXPORTER_LISTEN
+              value: ":9400"
+            - name: DCGM_EXPORTER_KUBERNETES
+              value: "true"
+            # Custom metrics file — only collect what we need
+            - name: DCGM_EXPORTER_COLLECTORS
+              value: "/etc/dcgm-exporter/custom-collectors.csv"
+          securityContext:
+            runAsNonRoot:   false
+            privileged:     true   # required for GPU access
+            capabilities:
+              add: ["SYS_ADMIN"]
+          volumeMounts:
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: dcgm-config
+              mountPath: /etc/dcgm-exporter
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu:    "100m"
+            limits:
+              memory: "256Mi"
+              cpu:    "200m"
+      volumes:
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+        - name: dcgm-config
+          configMap:
+            name: dcgm-metrics-config
+---
+# Custom DCGM metrics — only collect AI-relevant GPU metrics
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dcgm-metrics-config
+  namespace: monitoring
+data:
+  custom-collectors.csv: |
+    # GPU Utilization
+    DCGM_FI_DEV_GPU_UTIL,      gauge, GPU utilization (%)
+    DCGM_FI_DEV_MEM_COPY_UTIL, gauge, Memory copy engine utilization (%)
+    DCGM_FI_DEV_ENC_UTIL,      gauge, Encoder utilization (%)
+    DCGM_FI_DEV_DEC_UTIL,      gauge, Decoder utilization (%)
+    
+    # VRAM
+    DCGM_FI_DEV_FB_FREE,       gauge, Free framebuffer memory (MiB)
+    DCGM_FI_DEV_FB_USED,       gauge, Used framebuffer memory (MiB)
+    DCGM_FI_DEV_FB_TOTAL,      gauge, Total framebuffer memory (MiB)
+    
+    # SM Occupancy (streaming multiprocessors)
+    DCGM_FI_PROF_SM_ACTIVE,    gauge, SM active ratio — compute efficiency
+    DCGM_FI_PROF_SM_OCCUPANCY, gauge, SM occupancy — thread block efficiency
+    
+    # Memory bandwidth
+    DCGM_FI_PROF_DRAM_ACTIVE,  gauge, DRAM bandwidth utilization
+    DCGM_FI_PROF_PCIE_TX_BYTES, counter, PCIe transmit bytes
+    DCGM_FI_PROF_PCIE_RX_BYTES, counter, PCIe receive bytes
+    DCGM_FI_PROF_NVLINK_TX_BYTES, counter, NVLink transmit bytes
+    DCGM_FI_PROF_NVLINK_RX_BYTES, counter, NVLink receive bytes
+    
+    # Thermals & Power
+    DCGM_FI_DEV_GPU_TEMP,      gauge, GPU temperature (C)
+    DCGM_FI_DEV_POWER_USAGE,   gauge, Power draw (W)
+    DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION, counter, Total energy (mJ)
+    
+    # Errors (critical for ML — NaN errors corrupt training)
+    DCGM_FI_DEV_ECC_SBE_VOL_TOTAL, counter, Single-bit ECC errors
+    DCGM_FI_DEV_ECC_DBE_VOL_TOTAL, counter, Double-bit ECC errors (fatal)
+    DCGM_FI_DEV_XID_ERRORS,        counter, XID errors (GPU faults)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+  labels:
+    app: dcgm-exporter
+spec:
+  clusterIP: None   # headless — Prometheus discovers via pod IPs
+  selector:
+    app: dcgm-exporter
+  ports:
+    - name: metrics
+      port: 9400
+      targetPort: 9400

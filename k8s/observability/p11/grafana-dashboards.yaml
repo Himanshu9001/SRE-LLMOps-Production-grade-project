@@ -1,0 +1,201 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-llmops-dashboards
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  sre-llmops-gpu.json: |
+    {
+      "title": "SRE LLMOps — GPU Metrics",
+      "uid": "sre-gpu",
+      "panels": [
+        {
+          "title": "GPU Utilization (%)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [{
+            "expr": "DCGM_FI_DEV_GPU_UTIL{namespace='inference'}",
+            "legendFormat": "{{instance}}"
+          }],
+          "fieldConfig": {
+            "defaults": {"min": 0, "max": 100, "unit": "percent",
+              "thresholds": {"steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 70},
+                {"color": "red", "value": 90}
+              ]}}
+          }
+        },
+        {
+          "title": "GPU VRAM Usage (GB)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {"expr": "DCGM_FI_DEV_FB_USED / 1024", "legendFormat": "Used"},
+            {"expr": "DCGM_FI_DEV_FB_TOTAL / 1024", "legendFormat": "Total"}
+          ]
+        },
+        {
+          "title": "SM Occupancy",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [{"expr": "DCGM_FI_PROF_SM_OCCUPANCY", "legendFormat": "SM Occupancy"}],
+          "description": "Streaming Multiprocessor thread block occupancy. Low = wasted compute capacity."
+        },
+        {
+          "title": "GPU Temperature (°C)",
+          "type": "gauge",
+          "gridPos": {"h": 8, "w": 6, "x": 12, "y": 8},
+          "targets": [{"expr": "DCGM_FI_DEV_GPU_TEMP"}],
+          "fieldConfig": {
+            "defaults": {"min": 0, "max": 100, "unit": "celsius",
+              "thresholds": {"steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 75},
+                {"color": "red", "value": 85}
+              ]}}
+          }
+        },
+        {
+          "title": "Power Draw (W)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 6, "x": 18, "y": 8},
+          "targets": [{"expr": "DCGM_FI_DEV_POWER_USAGE", "legendFormat": "Power (W)"}]
+        }
+      ]
+    }
+
+  sre-llmops-inference.json: |
+    {
+      "title": "SRE LLMOps — Inference Metrics",
+      "uid": "sre-inference",
+      "panels": [
+        {
+          "title": "Request Throughput (req/s)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [{
+            "expr": "rate(vllm_requests_total{status='success'}[1m])",
+            "legendFormat": "Successful requests/s"
+          }]
+        },
+        {
+          "title": "Token Throughput (tok/s)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [{
+            "expr": "rate(vllm_tokens_generated_total[1m])",
+            "legendFormat": "Generated tokens/s"
+          }]
+        },
+        {
+          "title": "Time to First Token — P50/P95/P99 (s)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "histogram_quantile(0.50, rate(vllm_time_to_first_token_seconds_bucket[5m]))", "legendFormat": "P50"},
+            {"expr": "histogram_quantile(0.95, rate(vllm_time_to_first_token_seconds_bucket[5m]))", "legendFormat": "P95"},
+            {"expr": "histogram_quantile(0.99, rate(vllm_time_to_first_token_seconds_bucket[5m]))", "legendFormat": "P99"}
+          ],
+          "description": "TTFT: time from request received to first token in response"
+        },
+        {
+          "title": "Inter-Token Latency P95 (ms)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [{
+            "expr": "histogram_quantile(0.95, rate(vllm_inter_token_latency_ms_bucket[5m]))",
+            "legendFormat": "P95 ITL (ms)"
+          }],
+          "description": "ITL: time between consecutive tokens. High ITL = choppy streaming."
+        },
+        {
+          "title": "KV Cache Utilization",
+          "type": "gauge",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
+          "targets": [{"expr": "vllm_kv_cache_usage_ratio * 100"}],
+          "fieldConfig": {
+            "defaults": {"unit": "percent", "min": 0, "max": 100,
+              "thresholds": {"steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 80},
+                {"color": "red", "value": 90}
+              ]}}
+          }
+        },
+        {
+          "title": "Concurrent Requests",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
+          "targets": [{"expr": "vllm_concurrent_requests", "legendFormat": "Active requests"}]
+        },
+        {
+          "title": "Error Rate (%)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
+          "targets": [{
+            "expr": "rate(vllm_requests_total{status='error'}[5m]) / rate(vllm_requests_total[5m]) * 100",
+            "legendFormat": "Error rate %"
+          }]
+        },
+        {
+          "title": "SRE Keyword Hit Rate (Online Eval)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+          "targets": [{
+            "expr": "sre_response_keyword_hit_rate",
+            "legendFormat": "Keyword hit rate"
+          }],
+          "description": "% of responses containing expected SRE keywords. Proxy for response quality."
+        },
+        {
+          "title": "Cost per Request (USD)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+          "targets": [{
+            "expr": "histogram_quantile(0.50, rate(sre_cost_per_request_usd_bucket[5m]))",
+            "legendFormat": "Median cost/request"
+          }]
+        }
+      ]
+    }
+
+  sre-llmops-training.json: |
+    {
+      "title": "SRE LLMOps — Training Metrics",
+      "uid": "sre-training",
+      "panels": [
+        {
+          "title": "Training Loss",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [{
+            "expr": "mlflow_train_loss",
+            "legendFormat": "Train loss"
+          }]
+        },
+        {
+          "title": "GPU Utilization During Training",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [{"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "GPU util %"}]
+        },
+        {
+          "title": "Training Throughput (samples/sec)",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8},
+          "targets": [{"expr": "mlflow_train_samples_per_second"}]
+        },
+        {
+          "title": "VRAM During Training",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 6, "y": 8},
+          "targets": [{
+            "expr": "DCGM_FI_DEV_FB_USED / 1024",
+            "legendFormat": "VRAM used (GB)"
+          }]
+        }
+      ]
+    }
