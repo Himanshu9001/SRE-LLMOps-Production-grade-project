@@ -1,0 +1,103 @@
+# CronJob: scale GPU nodes on business hours schedule
+# Scale UP: 9 AM IST (3:30 AM UTC) Monday-Friday
+# Scale DOWN: 6 PM IST (12:30 PM UTC) Monday-Friday
+# Weekend: always scaled down
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gpu-scale-up
+  namespace: training
+spec:
+  schedule: "30 3 * * 1-5"   # 3:30 AM UTC = 9 AM IST, Mon-Fri
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: training-job
+          restartPolicy: OnFailure
+          containers:
+            - name: scaler
+              image: amazon/aws-cli:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  aws eks update-nodegroup-config \
+                    --cluster-name sre-llmops-production \
+                    --nodegroup-name sre-llmops-production-gpu \
+                    --scaling-config minSize=0,maxSize=2,desiredSize=1 \
+                    --region us-east-1
+                  echo "GPU node scaled up for business hours"
+              env:
+                - name: AWS_DEFAULT_REGION
+                  value: "us-east-1"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gpu-scale-down
+  namespace: training
+spec:
+  schedule: "30 12 * * 1-5"  # 12:30 PM UTC = 6 PM IST, Mon-Fri
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: training-job
+          restartPolicy: OnFailure
+          containers:
+            - name: scaler
+              image: amazon/aws-cli:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  aws eks update-nodegroup-config \
+                    --cluster-name sre-llmops-production \
+                    --nodegroup-name sre-llmops-production-gpu \
+                    --scaling-config minSize=0,maxSize=2,desiredSize=0 \
+                    --region us-east-1
+                  echo "GPU node scaled down after business hours"
+              env:
+                - name: AWS_DEFAULT_REGION
+                  value: "us-east-1"
+---
+# S3 lifecycle policy — auto-delete old artifacts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: s3-lifecycle-policy
+  namespace: training
+data:
+  policy.json: |
+    {
+      "Rules": [
+        {
+          "ID": "delete-old-checkpoints",
+          "Filter": {"Prefix": "checkpoints/"},
+          "Status": "Enabled",
+          "Expiration": {"Days": 7}
+        },
+        {
+          "ID": "delete-old-soft-labels",
+          "Filter": {"Prefix": "soft-labels/"},
+          "Status": "Enabled",
+          "Expiration": {"Days": 30}
+        },
+        {
+          "ID": "archive-old-eval-results",
+          "Filter": {"Prefix": "eval-results/"},
+          "Status": "Enabled",
+          "Transitions": [
+            {"Days": 30,  "StorageClass": "STANDARD_IA"},
+            {"Days": 90,  "StorageClass": "GLACIER"}
+          ]
+        },
+        {
+          "ID": "delete-old-cost-records",
+          "Filter": {"Prefix": "cost-records/"},
+          "Status": "Enabled",
+          "Expiration": {"Days": 90}
+        }
+      ]
+    }
