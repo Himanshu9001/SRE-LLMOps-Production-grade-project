@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+  namespace: inference
+  labels:
+    app: vllm-server
+    version: p10
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-server
+  template:
+    metadata:
+      labels:
+        app: vllm-server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8000"
+        prometheus.io/path:   "/metrics"
+    spec:
+      serviceAccountName: vllm
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      containers:
+        - name: vllm
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/serving:p10-v1
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - vllm.entrypoints.openai.api_server
+            - --model=/models/llama3-8b-awq
+            - --quantization=awq
+            - --tensor-parallel-size=1
+            - --gpu-memory-utilization=0.90
+            - --max-model-len=4096
+            - --max-num-seqs=256
+            - --enable-chunked-prefill
+            - --served-model-name=sre-llmops
+            - --host=0.0.0.0
+            - --port=8000
+            - --uvicorn-log-level=info
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: "spawn"
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 30   # 5 mins for model load
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+      initContainers:
+        - name: download-model
+          image: amazon/aws-cli:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Downloading AWQ quantized model..."
+              aws s3 sync \
+                s3://sre-llmops-artifacts/quantized/llama3-8b-awq-4bit \
+                /models/llama3-8b-awq \
+                --no-progress
+              echo "Model download complete: $(du -sh /models/llama3-8b-awq)"
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "2"
+            limits:
+              memory: "4Gi"
+              cpu: "4"
+      volumes:
+        - name: model-storage
+          emptyDir:
+            sizeLimit: "20Gi"
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "16Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+  namespace: inference
+  labels:
+    app: vllm-server
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-server
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

@@ -1,0 +1,55 @@
+# HPA based on custom Prometheus metrics via KEDA
+# Scales vLLM replicas based on concurrent request count
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm-hpa
+  namespace: inference
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm-server
+  minReplicas: 1
+  maxReplicas: 4    # limited by GPU quota
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: vllm_concurrent_requests
+        target:
+          type: AverageValue
+          averageValue: "50"   # scale up when avg concurrent > 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60    # wait 1 min before scaling up
+      policies:
+        - type:          Pods
+          value:         1
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300   # wait 5 min before scaling down
+      policies:
+        - type:          Pods
+          value:         1
+          periodSeconds: 120
+---
+# KEDA ScaledObject for custom Prometheus metrics
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-scaledobject
+  namespace: inference
+spec:
+  scaleTargetRef:
+    name: vllm-server
+  minReplicaCount: 0    # scale to zero when no traffic
+  maxReplicaCount: 4
+  cooldownPeriod: 300   # 5 min cooldown before scale to zero
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local
+        metricName:    vllm_concurrent_requests
+        threshold:     "50"
+        query:         sum(vllm_concurrent_requests{namespace="inference"})

@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-gateway
+  namespace: inference
+  labels:
+    app: ai-gateway
+spec:
+  replicas: 2   # 2 replicas for HA — gateway is stateless
+  selector:
+    matchLabels:
+      app: ai-gateway
+  template:
+    metadata:
+      labels:
+        app: ai-gateway
+    spec:
+      serviceAccountName: vllm
+      nodeSelector:
+        role: cpu-workload
+      containers:
+        - name: gateway
+          image: 011528270076.dkr.ecr.us-east-1.amazonaws.com/sre-llmops/serving:p10-v1
+          command:
+            - python
+            - -m
+            - src.serving.ai_gateway
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: VLLM_ENDPOINT
+              value: "http://vllm-service.inference.svc.cluster.local:8000"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: api-key
+                  optional: true   # fallback to vLLM only if no OpenAI key
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-gateway-service
+  namespace: inference
+spec:
+  type: ClusterIP
+  selector:
+    app: ai-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# ALB Ingress — exposes gateway externally
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-gateway-ingress
+  namespace: inference
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-gateway-service
+                port:
+                  number: 8080
