@@ -1,5 +1,3 @@
-```bash
-cat > README.md << 'ENDOFREADME'
 # SRE LLMOps Production Platform
 
 > Fine-tuning, distilling, quantizing, and self-hosting Llama 3 8B on EKS GPU infrastructure — purpose-built for SRE/DevOps operational knowledge.
@@ -456,5 +454,3 @@ Stack: AWS, Azure, Kubernetes, Terraform, MLflow, Prometheus, Grafana, Dynatrace
 ---
 
 *Built as a production portfolio project targeting AI Infrastructure Engineer and ML Platform Engineer roles.*
-ENDOFREADME
-```
