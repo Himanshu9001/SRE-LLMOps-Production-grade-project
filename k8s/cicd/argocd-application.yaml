@@ -1,0 +1,65 @@
+# ArgoCD Application — GitOps for inference serving
+# Watches k8s/serving/ directory in Git
+# Auto-syncs on push to main branch
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sre-llmops-serving
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL:        https://github.com/Himanshu9001/SRE-LLMOps-Production-grade-project
+    targetRevision: main
+    path:           k8s/serving
+
+  destination:
+    server:    https://kubernetes.default.svc
+    namespace: inference
+
+  syncPolicy:
+    automated:
+      prune:    true    # delete resources removed from Git
+      selfHeal: true    # revert manual kubectl changes
+
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+
+    retry:
+      limit: 5
+      backoff:
+        duration:    5s
+        factor:      2
+        maxDuration: 3m
+
+  # Health checks for vLLM deployment
+  ignoreDifferences:
+    - group:  apps
+      kind:   Deployment
+      name:   vllm-server
+      jsonPointers:
+        - /spec/replicas   # HPA manages replicas — ignore drift
+---
+# ArgoCD Application for observability stack
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sre-llmops-observability
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL:        https://github.com/Himanshu9001/SRE-LLMOps-Production-grade-project
+    targetRevision: main
+    path:           k8s/observability
+  destination:
+    server:    https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune:    true
+      selfHeal: true

@@ -1,0 +1,596 @@
+# P14b — Training + Evaluation + Model Promotion Pipeline
+# Triggers: manual dispatch or dataset pipeline completion
+# Steps: build image → train → evaluate → gate → promote → deploy
+name: Training Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_variant:
+        description: 'Model variant to train'
+        type: choice
+        options: [qlora, distillation, lora-kd]
+        default: qlora
+      base_model:
+        description: 'Base model S3 prefix'
+        default: 'base-models/llama3-8b'
+      num_epochs:
+        description: 'Number of training epochs'
+        default: '3'
+      skip_training:
+        description: 'Skip training (use existing adapter)'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      model_variant:
+        type: string
+        default: qlora
+      trigger:
+        type: string
+        default: manual
+
+env:
+  AWS_REGION:       us-east-1
+  S3_BUCKET:        sre-llmops-artifacts
+  ECR_REGISTRY:     011528270076.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPO:         sre-llmops/training
+  EKS_CLUSTER:      sre-llmops-production
+  MLFLOW_URI:       http://mlflow.mlflow.svc.cluster.local:5000
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Job 1: Build and push Docker image
+  # -----------------------------------------------------------------------
+  build-image:
+    name: Build Training Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context:   .
+          file:      docker/Dockerfile.training
+          platforms: linux/amd64
+          push:      true
+          tags:      ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          # GitHub Actions cache: avoids 20min PyTorch rebuild on every run
+
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:    ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          format:       sarif
+          output:       trivy-results.sarif
+          severity:     CRITICAL,HIGH
+          exit-code:    '1'   # fail on critical/high CVEs
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  # -----------------------------------------------------------------------
+  # Job 2: Run training on EKS GPU node
+  # -----------------------------------------------------------------------
+  train:
+    name: Train Model
+    runs-on: ubuntu-latest
+    needs: build-image
+    if: ${{ !inputs.skip_training }}
+    outputs:
+      adapter_s3_path: ${{ steps.get-adapter.outputs.adapter_path }}
+      mlflow_run_id:   ${{ steps.get-adapter.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS + kubectl
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name   ${{ env.EKS_CLUSTER }}
+
+      - name: Scale up GPU node
+        run: |
+          aws eks update-nodegroup-config \
+            --cluster-name  ${{ env.EKS_CLUSTER }} \
+            --nodegroup-name sre-llmops-production-gpu \
+            --scaling-config minSize=0,maxSize=2,desiredSize=1 \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Waiting for GPU node..."
+          kubectl wait --for=condition=Ready nodes \
+            -l node-type=gpu \
+            --timeout=600s
+
+      - name: Submit training job
+        id: submit-job
+        run: |
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}"
+          RUN_NAME="ci-${{ inputs.model_variant }}-$(date +%Y%m%d%H%M)"
+
+          cat > /tmp/training-job.yaml << YAML
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ci-training-${{ github.run_number }}
+            namespace: training
+            labels:
+              triggered-by: github-actions
+              run-number:   "${{ github.run_number }}"
+              variant:      "${{ inputs.model_variant }}"
+          spec:
+            ttlSecondsAfterFinished: 3600
+            backoffLimit: 0
+            template:
+              spec:
+                serviceAccountName: training-job
+                restartPolicy: Never
+                nodeSelector:
+                  node-type: gpu
+                tolerations:
+                  - key: nvidia.com/gpu
+                    operator: Equal
+                    value: "true"
+                    effect: NoSchedule
+                containers:
+                  - name: trainer
+                    image: ${IMAGE}
+                    imagePullPolicy: Always
+                    command:
+                      - python
+                      - -m
+                      - src.training.train
+                      - --model-s3-prefix=${{ inputs.base_model }}
+                      - --dataset-s3-key=datasets/v1/sre_ops_train_v1.jsonl
+                      - --val-s3-key=datasets/v1/sre_ops_val_v1.jsonl
+                      - --output-s3-prefix=adapters/ci-${{ github.run_number }}
+                      - --experiment-name=ci-pipeline
+                      - --num-epochs=${{ inputs.num_epochs }}
+                      - --batch-size=4
+                      - --grad-accum-steps=4
+                      - --learning-rate=2e-4
+                    env:
+                      - name: AWS_DEFAULT_REGION
+                        value: ${{ env.AWS_REGION }}
+                      - name: MLFLOW_TRACKING_URI
+                        value: ${{ env.MLFLOW_URI }}
+                      - name: MLFLOW_RUN_NAME
+                        value: ${RUN_NAME}
+                    resources:
+                      limits:
+                        nvidia.com/gpu: "1"
+                        memory: "30Gi"
+                        cpu: "8"
+                    volumeMounts:
+                      - name: tmp
+                        mountPath: /tmp
+                      - name: shm
+                        mountPath: /dev/shm
+                volumes:
+                  - name: tmp
+                    emptyDir:
+                      sizeLimit: "80Gi"
+                  - name: shm
+                    emptyDir:
+                      medium: Memory
+                      sizeLimit: "16Gi"
+          YAML
+
+          kubectl apply -f /tmp/training-job.yaml
+          echo "JOB_NAME=ci-training-${{ github.run_number }}" >> $GITHUB_ENV
+
+      - name: Wait for training completion
+        timeout-minutes: 240
+        run: |
+          echo "Waiting for job $JOB_NAME to complete..."
+          kubectl wait \
+            --for=condition=complete \
+            --timeout=14400s \
+            job/$JOB_NAME \
+            -n training
+
+          STATUS=$(kubectl get job $JOB_NAME -n training \
+            -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
+
+          if [ "$STATUS" = "True" ]; then
+            echo "Training job FAILED"
+            kubectl logs -n training \
+              -l job-name=$JOB_NAME \
+              --tail=100
+            exit 1
+          fi
+
+          echo "Training job completed successfully"
+
+      - name: Get adapter path from MLflow
+        id: get-adapter
+        run: |
+          # Query MLflow for the latest run from this CI job
+          ADAPTER_PATH="s3://${{ env.S3_BUCKET }}/adapters/ci-${{ github.run_number }}/final"
+          echo "adapter_path=$ADAPTER_PATH" >> $GITHUB_OUTPUT
+          echo "Adapter at: $ADAPTER_PATH"
+
+      - name: Scale down GPU node
+        if: always()   # scale down even if training failed
+        run: |
+          aws eks update-nodegroup-config \
+            --cluster-name   ${{ env.EKS_CLUSTER }} \
+            --nodegroup-name sre-llmops-production-gpu \
+            --scaling-config minSize=0,maxSize=2,desiredSize=0 \
+            --region ${{ env.AWS_REGION }}
+
+  # -----------------------------------------------------------------------
+  # Job 3: Evaluate model + check eval gate
+  # -----------------------------------------------------------------------
+  evaluate:
+    name: Evaluate Model
+    runs-on: ubuntu-latest
+    needs: train
+    outputs:
+      gate_passed:  ${{ steps.eval-gate.outputs.passed }}
+      sre_score:    ${{ steps.eval-gate.outputs.sre_score }}
+      eval_run_id:  ${{ steps.eval-gate.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS + kubectl
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name   ${{ env.EKS_CLUSTER }}
+
+      - name: Scale up GPU for evaluation
+        run: |
+          aws eks update-nodegroup-config \
+            --cluster-name   ${{ env.EKS_CLUSTER }} \
+            --nodegroup-name sre-llmops-production-gpu \
+            --scaling-config minSize=0,maxSize=2,desiredSize=1 \
+            --region ${{ env.AWS_REGION }}
+          kubectl wait --for=condition=Ready nodes \
+            -l node-type=gpu --timeout=600s
+
+      - name: Submit evaluation job
+        run: |
+          cat > /tmp/eval-job.yaml << YAML
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ci-eval-${{ github.run_number }}
+            namespace: training
+          spec:
+            ttlSecondsAfterFinished: 3600
+            backoffLimit: 0
+            template:
+              spec:
+                serviceAccountName: training-job
+                restartPolicy: Never
+                nodeSelector:
+                  node-type: gpu
+                tolerations:
+                  - key: nvidia.com/gpu
+                    operator: Exists
+                    effect: NoSchedule
+                containers:
+                  - name: evaluator
+                    image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
+                    command:
+                      - python
+                      - -m
+                      - src.evaluation.run_eval_pipeline
+                      - --model-name=ci-${{ github.run_number }}
+                      - --model-s3-prefix=base-models/llama3-8b
+                      - --adapter-s3-prefix=adapters/ci-${{ github.run_number }}/final
+                      - --use-qlora
+                      - --skip-lm-eval
+                    env:
+                      - name: AWS_DEFAULT_REGION
+                        value: ${{ env.AWS_REGION }}
+                      - name: MLFLOW_TRACKING_URI
+                        value: ${{ env.MLFLOW_URI }}
+                    resources:
+                      limits:
+                        nvidia.com/gpu: "1"
+                        memory: "30Gi"
+                        cpu: "8"
+                    volumeMounts:
+                      - name: tmp
+                        mountPath: /tmp
+                volumes:
+                  - name: tmp
+                    emptyDir:
+                      sizeLimit: "50Gi"
+          YAML
+
+          kubectl apply -f /tmp/eval-job.yaml
+
+      - name: Wait for evaluation
+        timeout-minutes: 120
+        run: |
+          kubectl wait \
+            --for=condition=complete \
+            --timeout=7200s \
+            job/ci-eval-${{ github.run_number }} \
+            -n training
+
+      - name: Check eval gate
+        id: eval-gate
+        run: |
+          # Download results from S3
+          aws s3 cp \
+            s3://${{ env.S3_BUCKET }}/eval-results/ci-${{ github.run_number }}/results.json \
+            /tmp/eval_results.json
+
+          python3 - << 'PYEOF'
+          import json, sys, os
+
+          with open("/tmp/eval_results.json") as f:
+              results = json.load(f)
+
+          sre_score   = results.get("sre_overall", 0)
+          gate_passed = results.get("eval_gate_passed", False)
+          failures    = results.get("eval_gate_failures", [])
+          run_id      = results.get("run_id", "")
+
+          print(f"SRE Score:    {sre_score:.3f}")
+          print(f"Gate Passed:  {gate_passed}")
+          print(f"Run ID:       {run_id}")
+
+          if failures:
+              print(f"Failures:")
+              for f in failures:
+                  print(f"  - {f}")
+
+          # Set outputs for GitHub Actions
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={'true' if gate_passed else 'false'}\n")
+              f.write(f"sre_score={sre_score:.3f}\n")
+              f.write(f"run_id={run_id}\n")
+
+          if not gate_passed:
+              print("❌ EVAL GATE FAILED — model will NOT be promoted")
+              sys.exit(1)
+
+          print("✅ EVAL GATE PASSED — promoting to production")
+          PYEOF
+
+      - name: Scale down GPU
+        if: always()
+        run: |
+          aws eks update-nodegroup-config \
+            --cluster-name   ${{ env.EKS_CLUSTER }} \
+            --nodegroup-name sre-llmops-production-gpu \
+            --scaling-config minSize=0,maxSize=2,desiredSize=0 \
+            --region ${{ env.AWS_REGION }}
+
+  # -----------------------------------------------------------------------
+  # Job 4: Promote model to production via MLflow registry
+  # -----------------------------------------------------------------------
+  promote:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs: evaluate
+    if: needs.evaluate.outputs.gate_passed == 'true'
+    environment: production   # requires manual approval in GitHub
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install mlflow
+        run: pip install mlflow boto3
+
+      - name: Promote model in MLflow registry
+        run: |
+          python3 - << 'PYEOF'
+          import mlflow
+          import boto3
+          import os
+
+          mlflow.set_tracking_uri("${{ env.MLFLOW_URI }}")
+          client = mlflow.tracking.MlflowClient()
+
+          run_id    = "${{ needs.evaluate.outputs.eval_run_id }}"
+          sre_score = float("${{ needs.evaluate.outputs.sre_score }}")
+          model_name = "sre-llmops-llama3-8b"
+
+          # Register model version
+          adapter_uri = f"s3://${{ env.S3_BUCKET }}/adapters/ci-${{ github.run_number }}/final"
+          mv = mlflow.register_model(
+              model_uri=adapter_uri,
+              name=model_name,
+              tags={
+                  "sre_score":     str(sre_score),
+                  "github_run":    "${{ github.run_number }}",
+                  "git_sha":       "${{ github.sha }}",
+                  "promoted_by":   "${{ github.actor }}",
+              }
+          )
+
+          print(f"Registered model version: {mv.version}")
+
+          # Transition to Production
+          client.transition_model_version_stage(
+              name=model_name,
+              version=mv.version,
+              stage="Production",
+              archive_existing_versions=True,
+          )
+
+          print(f"Model {model_name} v{mv.version} → Production")
+          print(f"SRE Score: {sre_score:.3f}")
+          PYEOF
+
+      - name: Copy adapter to production S3 path
+        run: |
+          aws s3 sync \
+            s3://${{ env.S3_BUCKET }}/adapters/ci-${{ github.run_number }}/final/ \
+            s3://${{ env.S3_BUCKET }}/adapters/production/latest/ \
+            --sse AES256
+
+          echo "Production adapter: s3://${{ env.S3_BUCKET }}/adapters/production/latest/"
+
+      - name: Update deployment manifest
+        run: |
+          # Update the image tag in ArgoCD-watched deployment manifest
+          sed -i "s|image:.*sre-llmops/training:.*|image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}|g" \
+            k8s/serving/p10/vllm-deployment.yaml
+
+          # Update adapter path annotation
+          sed -i "s|adapter-version:.*|adapter-version: ci-${{ github.run_number }}|g" \
+            k8s/serving/p10/vllm-deployment.yaml
+
+          git config user.email "ci@sre-llmops.io"
+          git config user.name  "SRE LLMOps CI"
+          git add k8s/serving/p10/vllm-deployment.yaml
+          git commit -m "chore(deploy): promote model ci-${{ github.run_number }} to production
+
+          SRE Score: ${{ needs.evaluate.outputs.sre_score }}
+          MLflow Run: ${{ needs.evaluate.outputs.eval_run_id }}
+          Git SHA: ${{ github.sha }}"
+          git push
+
+      - name: Create production release tag
+        run: |
+          git tag -a "model-v${{ github.run_number }}" \
+            -m "Production model release ${{ github.run_number }}
+          SRE Score: ${{ needs.evaluate.outputs.sre_score }}
+          Base model: ${{ inputs.base_model }}"
+          git push origin "model-v${{ github.run_number }}"
+
+  # -----------------------------------------------------------------------
+  # Job 5: Canary deployment via ArgoCD
+  # -----------------------------------------------------------------------
+  deploy-canary:
+    name: Canary Deployment
+    runs-on: ubuntu-latest
+    needs: promote
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS + kubectl
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name   ${{ env.EKS_CLUSTER }}
+
+      - name: Deploy canary (10% traffic)
+        run: |
+          kubectl apply -f k8s/cicd/canary-deployment.yaml
+          echo "Canary deployed — 10% traffic"
+
+      - name: Monitor canary for 5 minutes
+        run: |
+          echo "Monitoring canary health for 5 minutes..."
+          sleep 300
+
+          # Check error rate on canary
+          CANARY_ERRORS=$(kubectl exec -n monitoring \
+            deploy/prometheus -- \
+            promtool query instant \
+            'rate(vllm_requests_total{status="error",version="canary"}[5m])' \
+            2>/dev/null || echo "0")
+
+          echo "Canary error rate: $CANARY_ERRORS"
+
+          # Promote to full if healthy, rollback if not
+          if echo "$CANARY_ERRORS" | grep -q "^0"; then
+            echo "✅ Canary healthy — promoting to 100%"
+            kubectl patch deployment vllm-server -n inference \
+              -p '{"spec":{"selector":{"matchLabels":{"version":"stable"}}}}'
+          else
+            echo "❌ Canary unhealthy — rolling back"
+            kubectl delete -f k8s/cicd/canary-deployment.yaml
+            exit 1
+          fi
+
+  # -----------------------------------------------------------------------
+  # Notification
+  # -----------------------------------------------------------------------
+  notify:
+    name: Notify Result
+    runs-on: ubuntu-latest
+    needs: [evaluate, promote, deploy-canary]
+    if: always()
+    steps:
+      - name: Post result summary
+        run: |
+          if [[ "${{ needs.evaluate.outputs.gate_passed }}" == "true" ]]; then
+            STATUS="✅ SUCCESS"
+            DETAILS="Model promoted to production"
+          else
+            STATUS="❌ FAILED"
+            DETAILS="Eval gate failed — model NOT promoted"
+          fi
+
+          echo "## Pipeline Result: $STATUS" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| SRE Score | ${{ needs.evaluate.outputs.sre_score }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Eval Gate | ${{ needs.evaluate.outputs.gate_passed }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run Number | ${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Details | $DETAILS |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,96 @@
+# Canary deployment — 10% traffic to new model version
+# Uses label-based traffic splitting via Service selector
+# Full canary: use Argo Rollouts or Flagger for weighted routing
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-canary
+  namespace: inference
+  labels:
+    app:     vllm-server
+    version: canary
+spec:
+  replicas: 1   # 1 canary : 9 stable = ~10% traffic (with 9 stable replicas)
+  selector:
+    matchLabels:
+      app:     vllm-server
+      version: canary
+  template:
+    metadata:
+      labels:
+        app:     vllm-server
+        version: canary
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8000"
+    spec:
+      serviceAccountName: vllm
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      containers:
+        - name: vllm
+          # New image tag set by CI pipeline
+          image: CANARY_IMAGE_PLACEHOLDER
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - vllm.entrypoints.openai.api_server
+            - --model=/models/llama3-8b-awq
+            - --quantization=awq
+            - --tensor-parallel-size=1
+            - --gpu-memory-utilization=0.90
+            - --max-model-len=4096
+            - --served-model-name=sre-llmops
+            - --host=0.0.0.0
+            - --port=8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              memory: "30Gi"
+              cpu: "8"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+      initContainers:
+        - name: download-model
+          image: amazon/aws-cli:latest
+          command:
+            - aws
+            - s3
+            - sync
+            - s3://sre-llmops-artifacts/quantized/llama3-8b-awq-4bit
+            - /models/llama3-8b-awq
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+      volumes:
+        - name: model-storage
+          emptyDir:
+            sizeLimit: "20Gi"
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "16Gi"

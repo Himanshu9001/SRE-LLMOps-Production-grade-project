@@ -1,0 +1,105 @@
+# P14a — Dataset Pipeline CI
+# Triggers: push to data/ or src/scrapers/ or configs/
+# Steps: validate → format → deduplicate → upload → DVC push
+name: Dataset Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'data/**'
+      - 'src/scrapers/**'
+      - 'src/formatters/**'
+      - 'src/validators/**'
+      - 'configs/scraper_config.yaml'
+      - 'configs/dataset_config.yaml'
+  workflow_dispatch:
+    inputs:
+      force_rescrape:
+        description: 'Force re-scrape all data sources'
+        type: boolean
+        default: false
+
+env:
+  AWS_REGION:    us-east-1
+  S3_BUCKET:     sre-llmops-artifacts
+  PYTHON_VER:    "3.11"
+
+jobs:
+  validate-dataset:
+    name: Validate Dataset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VER }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Configure DVC remote
+        run: |
+          dvc remote modify s3remote region ${{ env.AWS_REGION }}
+          dvc pull data/validated/ --no-run-cache
+
+      - name: Run dataset validation
+        run: |
+          python -m src.pipeline.run_pipeline --stage validate
+          echo "DATASET_VERSION=v$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
+
+      - name: Check dataset quality gate
+        run: |
+          python3 - << 'PYEOF'
+          import jsonlines, sys
+
+          with jsonlines.open("data/validated/sre_ops_train_v1.jsonl") as r:
+              records = list(r)
+
+          print(f"Train records: {len(records)}")
+
+          # Quality gates
+          assert len(records) >= 3000, f"Too few training records: {len(records)} < 3000"
+
+          # Check output length distribution
+          avg_output_len = sum(len(r["output"].split()) for r in records) / len(records)
+          print(f"Avg output length: {avg_output_len:.0f} words")
+          assert avg_output_len >= 30, f"Outputs too short: avg {avg_output_len} words"
+
+          # Check source diversity
+          sources = set(r.get("source", "unknown") for r in records)
+          print(f"Sources: {sources}")
+          assert len(sources) >= 2, f"Not enough data sources: {sources}"
+
+          print("✅ Dataset quality gate PASSED")
+          PYEOF
+
+      - name: Upload to S3 + DVC push
+        run: |
+          aws s3 cp data/validated/sre_ops_train_v1.jsonl \
+            s3://${{ env.S3_BUCKET }}/datasets/v1/sre_ops_train_v1.jsonl \
+            --sse AES256
+          aws s3 cp data/validated/sre_ops_val_v1.jsonl \
+            s3://${{ env.S3_BUCKET }}/datasets/v1/sre_ops_val_v1.jsonl \
+            --sse AES256
+          dvc commit --force
+          dvc push
+
+      - name: Create dataset version tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.email "ci@sre-llmops.io"
+          git config user.name  "SRE LLMOps CI"
+          git tag -a "dataset-${{ env.DATASET_VERSION }}" \
+            -m "Dataset version ${{ env.DATASET_VERSION }}: $(wc -l < data/validated/sre_ops_train_v1.jsonl) records"
+          git push origin "dataset-${{ env.DATASET_VERSION }}"
