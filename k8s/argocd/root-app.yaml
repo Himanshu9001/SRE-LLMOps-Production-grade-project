@@ -1,0 +1,23 @@
+# App of Apps pattern — single ArgoCD application that manages all others
+# Apply this once manually: kubectl apply -f k8s/argocd/root-app.yaml
+# After that, ArgoCD manages itself and all child apps from Git
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sre-llmops-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL:        https://github.com/Himanshu9001/SRE-LLMOps-Production-grade-project
+    targetRevision: main
+    path:           k8s/argocd/apps    # watches this directory for child apps
+  destination:
+    server:    https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune:    true
+      selfHeal: true

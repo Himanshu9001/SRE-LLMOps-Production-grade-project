@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sre-llmops-mlflow
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL:        https://github.com/Himanshu9001/SRE-LLMOps-Production-grade-project
+    targetRevision: main
+    path:           k8s/mlflow
+  destination:
+    server:    https://kubernetes.default.svc
+    namespace: mlflow
+  syncPolicy:
+    automated:
+      prune:    true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+  ignoreDifferences:
+    - group: apps
+      kind:  Deployment
+      jsonPointers:
+        - /spec/replicas

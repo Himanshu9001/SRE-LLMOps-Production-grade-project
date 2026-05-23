@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sre-llmops-rbac
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL:        https://github.com/Himanshu9001/SRE-LLMOps-Production-grade-project
+    targetRevision: main
+    path:           k8s/rbac
+  destination:
+    server:    https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune:    false
+      selfHeal: true
